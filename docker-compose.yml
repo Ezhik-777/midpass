@@ -1,0 +1,29 @@
+services:
+  midpass:
+    build:
+      context: .
+      args:
+        MIDPASS_VERSION: "1.0.4"
+    image: midpass-bot:1.0.4
+    container_name: midpass-bot
+    restart: unless-stopped
+
+    environment:
+      MODE: cron
+      INTERVAL_MINUTES: "60"
+      TZ: "Europe/Berlin"
+
+    volumes:
+      - ./config.txt:/opt/midpass/config.txt:ro
+      - ./data/logs:/opt/midpass/logs
+      - ./data/temp:/opt/midpass/temp
+
+    read_only: true
+    tmpfs:
+      - /tmp:size=16M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"

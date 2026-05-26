@@ -1,0 +1,17 @@
+EMAIL=your.email@example.com
+PASSWORD=YourMidpassPassword
+
+# --- Страсбург (Франция) ---
+COUNTRY_ID=87f7e23f-792f-6b4c-7967-863fecc38ee9
+SERVICE_PROVIDER_ID=9c9465a1-c3e6-8964-94c4-4f0c9e844079
+
+# --- Бонн (Германия) — альтернатива ---
+# COUNTRY_ID=ce942619-87f8-bfdc-4ec0-a149c2d13888
+# SERVICE_PROVIDER_ID=1acc8a95-50f7-e892-d176-db243bc57051
+
+TIMEZONE=Europe/Berlin
+
+# Опционально: ключ от rucaptcha.com / 2captcha.com для решения капчи
+# (если не задан — используется встроенный распознаватель, который может не справиться с обновлённой капчей)
+# RUCAPTCHA_API_KEY=
+# RUCAPTCHA_ENDPOINT=https://api.rucaptcha.com
