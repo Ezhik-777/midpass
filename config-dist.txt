@@ -10,3 +10,10 @@ TIMEZONE=Asia/Tbilisi
 COUNTRY_ID=88655495-3b8c-f56d-5337-0f2743a7bfed
 # Тбилиси - Консульская служба Секции интересов РФ
 SERVICE_PROVIDER_ID=b8af6319-9d8d-5bd9-f896-edb8b97362d0
+
+# Опционально: API-ключ rucaptcha.com / 2captcha.com для решения CAPTCHA.
+# Если не задан — используется встроенный распознаватель.
+# После редизайна сайта (Angular SPA, 2026) встроенный распознаватель
+# капчу не разгадывает, поэтому ключ rucaptcha де-факто обязателен.
+# RUCAPTCHA_API_KEY=
+# RUCAPTCHA_ENDPOINT=https://api.rucaptcha.com

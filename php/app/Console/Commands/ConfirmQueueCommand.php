@@ -2,7 +2,9 @@
 
 namespace App\Console\Commands;
 
+use App\CaptchaSolver\CaptchaSolverInterface;
 use App\CaptchaSolver\CaptchaSolverQMidPass;
+use App\CaptchaSolver\CaptchaSolverRuCaptcha;
 use App\Exceptions\PermanentException;
 use App\ResourceManager;
 use Carbon\Carbon;
@@ -36,21 +38,21 @@ class ConfirmQueueCommand extends AbstractCommand
     private array $state;
 
     private array $httpHeaders = [
-        'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept' => 'application/json, text/plain, */*',
         'Accept-Encoding' => 'gzip, deflate',
         'Accept-Language' => 'en-US,en;q=0.9,ru;q=0.8',
         'Cache-Control' => 'no-cache',
         'Dnt' => '1',
+        'Origin' => 'https://q.midpass.ru',
         'Pragma' => 'no-cache',
         'Sec-Ch-Ua' => '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
         'Sec-Ch-Ua-Mobile' => '?0',
         'Sec-Ch-Ua-Platform' => '"Windows"',
-        'Sec-Fetch-Dest' => 'document',
-        'Sec-Fetch-Mode' => 'navigate',
+        'Sec-Fetch-Dest' => 'empty',
+        'Sec-Fetch-Mode' => 'cors',
         'Sec-Fetch-Site' => 'same-origin',
-        'Sec-Fetch-User' => '?1',
-        'Upgrade-Insecure-Requests' => '1',
         'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'X-Requested-With' => 'XMLHttpRequest',
     ];
 
     public function __construct(ResourceManager $resourceManager)
@@ -131,27 +133,12 @@ class ConfirmQueueCommand extends AbstractCommand
             }
 
             // Step 1: Solve CAPTCHA, Login
-            $captchaCode = $retryHelper->execute(function () {
+            $retryHelper->execute(function () {
                 $this->logger->notice("Start login");
-                $this->logger->info("Load CAPTCHA for login");
-                $captchaFilePath = $this->loadCaptcha();
-                $this->logger->debug("Solve CAPTCHA");
-                $captchaSolver = new CaptchaSolverQMidPass();
-                $captchaImage = imagecreatefromjpeg($captchaFilePath);
-                $captchaCode = $captchaSolver->solveCaptcha($captchaImage);
-                unlink($captchaFilePath); // remove temporary file with CAPTCHA image
-                if ($captchaCode === null) {
-                    throw new \Exception("Unable to solve CAPTCHA");
-                }
-                $this->logger->debug("CAPTCHA: " . $captchaCode . " (accuracy: " . number_format(round($captchaSolver->accuracy, 1), 1) . '%)');
-                if ($captchaSolver->accuracy < 70) {
-                    throw new \Exception("CAPTCHA solution accuracy is too low - reload");
-                }
-
+                $captchaCode = $this->loadAndSolveCaptcha('login');
                 $this->logger->info("Login as {$this->config->get('queue.email')}");
                 $this->login($this->config->get('queue.email'), $this->config->get('queue.password'), $captchaCode);
                 $this->logger->notice("Successful login");
-                return $captchaCode;
             }, 5);
 
             // Step 2: Get a list of waiting appointments
@@ -181,10 +168,12 @@ class ConfirmQueueCommand extends AbstractCommand
 
                 $state['WaitingAppointments']['LastConfirmation'] = [];
                 foreach ($appointments as $appointment) {
-                    $retryHelper->execute(function () use ($appointment, $captchaCode, &$state) {
+                    $retryHelper->execute(function () use ($appointment, &$state) {
                         if ($appointment['CanConfirm']) {
                             $this->logger->notice("Confirm appointment \"{$appointment['ServiceName']}\" for \"" . trim($appointment['FullName']) . "\"");
-                            $this->confirmAppointment($appointment['WaitingAppointmentId'], $captchaCode);
+                            // New API requires a fresh captcha per confirm action
+                            $confirmCaptcha = $this->loadAndSolveCaptcha('confirm');
+                            $this->confirmAppointment($appointment['WaitingAppointmentId'], $confirmCaptcha);
                             $state['WaitingAppointments']['LastConfirmation'][$appointment['WaitingAppointmentId']] = (new \DateTime('now'))->format('c');
                         } else {
                             $this->logger->notice("Skip appointment \"{$appointment['ServiceName']}\" for \"" . trim($appointment['FullName']) . "\" - not available yet");
@@ -219,17 +208,54 @@ class ConfirmQueueCommand extends AbstractCommand
     {
         return $this->guzzleRetryHelper->execute(function() {
             $tick = floor(microtime(true) * 1000);
-            $response = $this->httpGet('https://q.midpass.ru/ru/Account/CaptchaImage?' . $tick, [
+            $response = $this->httpGet('https://q.midpass.ru/api/Account/CaptchaImage?' . $tick, [
                 \GuzzleHttp\RequestOptions::HEADERS => [
-                    'Origin' => 'https://q.midpass.ru',
-                    'Referer' => 'https://q.midpass.ru/',
+                    'Referer' => 'https://q.midpass.ru/ru/account/PrivatePersonLogOn',
+                    'Accept' => 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
                 ],
             ]);
-            //echo json_encode($response->getHeaders(), JSON_PRETTY_PRINT) . "\n";
-            $captchaFilePath = PROJECT_ROOT_DIR . '/../temp/captcha-' . $tick . '.jpg';
+            $captchaFilePath = PROJECT_ROOT_DIR . '/../temp/captcha-' . $tick . '.png';
             file_put_contents($captchaFilePath, $response->getBody()->getContents());
             return $captchaFilePath;
         }, 5);
+    }
+
+    private function loadAndSolveCaptcha(string $purpose = 'login'): string
+    {
+        $this->logger->info("Load CAPTCHA for {$purpose}");
+        $captchaFilePath = $this->loadCaptcha();
+        $this->logger->debug("Solve CAPTCHA");
+        $captchaSolver = $this->makeCaptchaSolver();
+        $captchaImage = imagecreatefrompng($captchaFilePath);
+        if ($captchaImage === false) {
+            @unlink($captchaFilePath);
+            throw new \Exception("Captcha endpoint returned non-PNG data");
+        }
+        $captchaCode = $captchaSolver->solveCaptcha($captchaImage);
+        @unlink($captchaFilePath);
+        if ($captchaCode === null) {
+            throw new \Exception("Unable to solve CAPTCHA");
+        }
+        $this->logger->debug("CAPTCHA: " . $captchaCode . " (accuracy: " . number_format(round($captchaSolver->accuracy, 1), 1) . '%)');
+        if ($captchaSolver->accuracy < 70) {
+            throw new \Exception("CAPTCHA solution accuracy is too low - reload");
+        }
+        return $captchaCode;
+    }
+
+    private function makeCaptchaSolver(): CaptchaSolverInterface
+    {
+        $apiKey = (string) $this->config->get('queue.rucaptchaApiKey');
+        if ($apiKey !== '') {
+            $this->logger->debug('Using rucaptcha solver');
+            return new CaptchaSolverRuCaptcha(
+                apiKey: $apiKey,
+                endpoint: (string) $this->config->get('queue.rucaptchaEndpoint'),
+                logger: $this->logger,
+            );
+        }
+        $this->logger->debug('Using built-in CaptchaSolverQMidPass');
+        return new CaptchaSolverQMidPass();
     }
 
     /**
@@ -241,43 +267,45 @@ class ConfirmQueueCommand extends AbstractCommand
      */
     private function login(string $email, string $password, string $captchaCode): void
     {
-        $payload = http_build_query([
-            'NeedShowBlockWithServiceProviderAndCountry' => 'True',
-            'CountryId' => $this->config->get('queue.countryId'),
-            'ServiceProviderId' => $this->config->get('queue.serviceProviderId'),
-            'Email' => $email,
-            'g-recaptcha-response' => '',
-            'Captcha' => $captchaCode,
-            'Password' => $password,
-        ]);
-        $response = $this->httpPost('https://q.midpass.ru/ru/Account/DoPrivatePersonLogOn', $payload,[
+        $payload = json_encode([
+            'serviceProviderId' => $this->config->get('queue.serviceProviderId'),
+            'email' => $email,
+            'password' => $password,
+            'captcha' => $captchaCode,
+        ], JSON_UNESCAPED_UNICODE);
+
+        $response = $this->httpPost('https://q.midpass.ru/api/Account/DoPrivatePersonLogOn', $payload, [
             \GuzzleHttp\RequestOptions::HEADERS => [
-                'Content-Type' => 'application/x-www-form-urlencoded',
-                'Referer' => 'https://q.midpass.ru/',
+                'Content-Type' => 'application/json',
+                'Referer' => 'https://q.midpass.ru/ru/account/PrivatePersonLogOn',
                 'Content-Length' => strlen($payload),
             ],
         ]);
+
         $content = $response->getBody()->getContents();
-//        file_put_contents(PROJECT_ROOT_DIR . '/login_form.html', $content);
-//        $content = file_get_contents(PROJECT_ROOT_DIR . '/login_form.html');
+        $data = json_decode($content, true);
+        if (!is_array($data)) {
+            throw new \Exception("Login: unexpected non-JSON response: " . substr($content, 0, 200));
+        }
 
-        if (preg_match('|<div id="captchaError" class="registerForm">(.*)</div>|iusU', $content, $m)) {
-            $errorMessage = html_entity_decode(trim(strip_tags($m[1])), ENT_QUOTES);
-            if ($errorMessage != '') {
-                throw new \Exception("CAPTCHA error: " . $errorMessage);
+        if (($data['result'] ?? false) !== true) {
+            $errorKey = (string) ($data['text'] ?? 'Unknown error');
+            // CAPTCHA-related errors -> temporary (retry with new captcha)
+            $captchaErrorKeys = [
+                'Controller.Account.Validation.CaptchaError',
+                'Controller.Account.Validation.CaptchaIsRequired',
+                'Controller.Account.Validation.WrongCaptcha',
+            ];
+            if (!empty($data['refreshCaptcha']) || in_array($errorKey, $captchaErrorKeys, true) || stripos($errorKey, 'captcha') !== false) {
+                throw new \Exception("CAPTCHA error: " . $errorKey);
             }
-        }
-        if (preg_match('|<span class="field-validation-error">(.*)</span>|iusU', $content, $m)) {
-            $errorMessage = html_entity_decode(trim(strip_tags($m[1])), ENT_QUOTES);
-            throw new PermanentException("Login form error: " . $errorMessage);
+            // Anything else (bad credentials, bad service provider, banned) -> permanent
+            throw new PermanentException("Login error: " . $errorKey);
         }
 
-        $aspAuthCookie = $this->cookieJar->getCookieByName('.ASPXAUTH');
-        if (!$aspAuthCookie) {
-            throw new \Exception("Failed authorization: no \".ASPXAUTH\" cookie came from the server");
-        }
-        if ($aspAuthCookie->getValue() == '') {
-            throw new \Exception("Failed authorization: \".ASPXAUTH\" cookie is empty");
+        $sessionCookie = $this->cookieJar->getCookieByName('.AspNetCore.Session');
+        if (!$sessionCookie || $sessionCookie->getValue() === '') {
+            throw new \Exception("Failed authorization: no \".AspNetCore.Session\" cookie came from the server");
         }
 
         $this->authorized = true;
@@ -285,52 +313,59 @@ class ConfirmQueueCommand extends AbstractCommand
 
     private function logout(): void
     {
-        $this->httpGet('https://q.midpass.ru/ru/Account/LogOff', [
-            \GuzzleHttp\RequestOptions::HEADERS => [
-                'Referer' => 'https://q.midpass.ru/ru/Appointments/WaitingList',
-            ],
-        ]);
+        try {
+            $this->httpPost('https://q.midpass.ru/api/Account/Logoff', '', [
+                \GuzzleHttp\RequestOptions::HEADERS => [
+                    'Content-Type' => 'application/json',
+                    'Referer' => 'https://q.midpass.ru/ru/Appointments/WaitingList',
+                    'Content-Length' => 0,
+                ],
+            ]);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Logout failed: ' . $e->getMessage());
+        }
         $this->authorized = false;
     }
 
     private function fetchWaitingAppointments(): array
     {
-        // TODO: Handle "Count"
-        $payload = http_build_query([
-            'begin' => 0,
-            'end' => 10,
+        $query = http_build_query([
+            'pageIndex' => 0,
+            'pageSize' => 10,
         ]);
-        return $this->guzzleRetryHelper->execute(function() use ($payload) {
-            $response = $this->httpPost('https://q.midpass.ru/ru/Appointments/FindWaitingAppointments', $payload, [
+        return $this->guzzleRetryHelper->execute(function() use ($query) {
+            $response = $this->httpGet('https://q.midpass.ru/api/Appointments/FindWaitingAppointments?' . $query, [
                 \GuzzleHttp\RequestOptions::HEADERS => [
-                    'Content-Type' => 'application/x-www-form-urlencoded; charset=UTF-8',
                     'Referer' => 'https://q.midpass.ru/ru/Appointments/WaitingList',
-                    'Content-Length' => strlen($payload),
-                    'X-Requested-With' => 'XMLHttpRequest',
                 ],
             ]);
             $content = $response->getBody()->getContents();
+            $this->logger->debug('FindWaitingAppointments raw response: ' . substr($content, 0, 800));
             $data = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
-            if (!array_key_exists('Items', $data)) {
-                throw new \Exception("Missing \"Items\" section in the FindWaitingAppointments JSON response");
+            if (!is_array($data)) {
+                throw new \Exception("FindWaitingAppointments: unexpected response");
             }
-            if (!is_array($data['Items'])) {
-                throw new \Exception("\"Items\" property is not array in the FindWaitingAppointments JSON response");
+            $itemsKey = array_key_exists('Items', $data) ? 'Items' : (array_key_exists('items', $data) ? 'items' : null);
+            if ($itemsKey === null) {
+                throw new \Exception("Missing \"Items\" section in the FindWaitingAppointments response: " . substr($content, 0, 200));
+            }
+            if (!is_array($data[$itemsKey])) {
+                throw new \Exception("\"Items\" property is not array in the FindWaitingAppointments response");
             }
             $appointments = [];
-            foreach ($data['Items'] as $item) {
+            foreach ($data[$itemsKey] as $item) {
                 $appointments[] = [
-                    "WaitingAppointmentId" => $item["WaitingAppointmentId"] ?? null,
-                    "PlaceInQueue" => $item["PlaceInQueue"] ?? null,
-                    "CanConfirm" => $item["CanConfirm"] ?? null,
-                    "CanCancel" => $item["CanCancel"] ?? null,
-                    "Email" => $item["Email"] ?? null,
-                    "FullName" => $item["FullName"] ?? null,
-                    "PhoneNumber" => $item["PhoneNumber"] ?? null,
-                    "ScheduledDateTimeString" => $item["ScheduledDateTimeString"] ?? null,
-                    "ServiceProviderCode" => $item["ServiceProviderCode"] ?? null,
-                    "ServiceId" => $item["ServiceId"] ?? null,
-                    "ServiceName" => $item["ServiceName"] ?? null,
+                    "WaitingAppointmentId" => $item["WaitingAppointmentId"] ?? $item["waitingAppointmentId"] ?? $item["id"] ?? null,
+                    "PlaceInQueue" => $item["PlaceInQueue"] ?? $item["placeInQueue"] ?? $item["placeInQueueString"] ?? null,
+                    "CanConfirm" => $item["CanConfirm"] ?? $item["canConfirm"] ?? null,
+                    "CanCancel" => $item["CanCancel"] ?? $item["canCancel"] ?? null,
+                    "Email" => $item["Email"] ?? $item["email"] ?? null,
+                    "FullName" => $item["FullName"] ?? $item["fullName"] ?? null,
+                    "PhoneNumber" => $item["PhoneNumber"] ?? $item["phoneNumber"] ?? null,
+                    "ScheduledDateTimeString" => $item["ScheduledDateTimeString"] ?? $item["scheduledDateTimeString"] ?? $item["scheduledDateTime"] ?? null,
+                    "ServiceProviderCode" => $item["ServiceProviderCode"] ?? $item["serviceProviderCode"] ?? null,
+                    "ServiceId" => $item["ServiceId"] ?? $item["serviceId"] ?? null,
+                    "ServiceName" => $item["ServiceName"] ?? $item["serviceName"] ?? $item["applicantInfo"] ?? '(unknown service)',
                 ];
             }
             return $appointments;
@@ -339,31 +374,33 @@ class ConfirmQueueCommand extends AbstractCommand
 
     private function confirmAppointment(string $appointmentId, string $captchaCode): void
     {
-        $payload = http_build_query([
-            'ids' => $appointmentId,
+        $payload = json_encode([
+            'ids' => [$appointmentId],
             'captcha' => $captchaCode,
-        ]);
+        ], JSON_UNESCAPED_UNICODE);
+
         $this->guzzleRetryHelper->execute(function() use ($payload) {
-            $response = $this->httpPost('https://q.midpass.ru/ru/Appointments/ConfirmWaitingAppointments', $payload, [
+            $response = $this->httpPost('https://q.midpass.ru/api/Appointments/ConfirmWaitingAppointments', $payload, [
                 \GuzzleHttp\RequestOptions::HEADERS => [
-                    'Content-Type' => 'application/x-www-form-urlencoded; charset=UTF-8',
+                    'Content-Type' => 'application/json',
                     'Referer' => 'https://q.midpass.ru/ru/Appointments/WaitingList',
                     'Content-Length' => strlen($payload),
-                    'X-Requested-With' => 'XMLHttpRequest',
                 ],
             ]);
             $content = $response->getBody()->getContents();
             $data = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
-//            echo "Content:\n";
-//            echo json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_LINE_TERMINATORS) . "\n";
 
-            if (array_key_exists('IsSuccessful', $data)) {
-                if ($data['IsSuccessful']) {
-                    $this->logger->notice("Successful confirmation");
-                } else {
-                    throw new \Exception((array_key_exists('ErrorMessage', $data) && $data['ErrorMessage'] != '') ? $data['ErrorMessage'] : 'Unknown error (missing error message from server)');
-                }
+            $okBool = $data['IsSuccessful'] ?? $data['isSuccessful'] ?? $data['result'] ?? null;
+            if ($okBool === true) {
+                $this->logger->notice("Successful confirmation");
+                return;
             }
+            if ($okBool === false) {
+                $msg = $data['ErrorMessage'] ?? $data['errorMessage'] ?? $data['text'] ?? 'Unknown error';
+                throw new \Exception((string) $msg);
+            }
+            // Unknown response shape — dump for diagnostics
+            $this->logger->debug('ConfirmWaitingAppointments raw response: ' . substr($content, 0, 500));
         }, 5);
     }
 

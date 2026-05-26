@@ -12,7 +12,7 @@ class CaptchaSolverQMidPass implements CaptchaSolverInterface
 //    private float $fontSize = 15;
 //    private int $captchaPosX = 4;
 //    private int $captchaPosY = 23;
-    private string $fontFile = 'C:\Windows\Fonts\tahoma.ttf';
+    private string $fontFile = PROJECT_ROOT_DIR . '/tahoma.ttf';
     private float $fontSize = 15;
     private int $captchaPosX = 5;
     private int $captchaPosY = 23;
