@@ -15,5 +15,5 @@ return [
         : 60,
     'maxSkipAgeHours' => isset($_ENV['MAX_SKIP_AGE_HOURS']) && $_ENV['MAX_SKIP_AGE_HOURS'] !== ''
         ? (int) $_ENV['MAX_SKIP_AGE_HOURS']
-        : 26,
+        : 72,
 ];
