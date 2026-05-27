@@ -7,10 +7,15 @@ INTERVAL_MINUTES="${INTERVAL_MINUTES:-60}"
 run_once() {
     echo "[$(date -Iseconds)] === Запуск confirm-queue ==="
     cd /opt/midpass
-    if bash ./confirm-queue.sh; then
+    # Вызываем PHP напрямую, чтобы пробросить exit code. Стандартный
+    # confirm-queue.sh заканчивается `read -n 1 ...` и затирает код возврата.
+    set +e
+    ./bin/php -c ./bin/php.ini -n ./php/console.php "confirm-queue"
+    rc=$?
+    set -e
+    if [[ $rc -eq 0 ]]; then
         echo "[$(date -Iseconds)] === OK ==="
     else
-        rc=$?
         echo "[$(date -Iseconds)] === FAIL (exit=$rc) ===" >&2
         if [[ "$MODE" == "oneshot" ]]; then
             exit $rc
