@@ -166,18 +166,31 @@ class ConfirmQueueCommand extends AbstractCommand
                 $table->render();
                 $this->logger->info("Waiting appointments: " . count($appointments) . "\n" . rtrim($buffer->fetch()));
 
-                $state['WaitingAppointments']['LastConfirmation'] = [];
+                // Preserve existing state and only update entries for the
+                // appointments we actually saw this round. This way state
+                // stays meaningful across runs and across schema additions.
+                $state = $this->state;
                 foreach ($appointments as $appointment) {
                     $retryHelper->execute(function () use ($appointment, &$state) {
+                        $id = $appointment['WaitingAppointmentId'];
+                        $nowIso = (new \DateTime('now'))->format('c');
                         if ($appointment['CanConfirm']) {
                             $this->logger->notice("Confirm appointment \"{$appointment['ServiceName']}\" for \"" . trim($appointment['FullName']) . "\"");
                             // New API requires a fresh captcha per confirm action
                             $confirmCaptcha = $this->loadAndSolveCaptcha('confirm');
-                            $this->confirmAppointment($appointment['WaitingAppointmentId'], $confirmCaptcha);
-                            $state['WaitingAppointments']['LastConfirmation'][$appointment['WaitingAppointmentId']] = (new \DateTime('now'))->format('c');
+                            $this->confirmAppointment($id, $confirmCaptcha);
+                            $state['WaitingAppointments']['LastConfirmation'][$id] = $nowIso;
+                            // On success the previous negative probe (if any)
+                            // becomes irrelevant.
+                            unset($state['WaitingAppointments']['LastNegativeProbe'][$id]);
                         } else {
                             $this->logger->notice("Skip appointment \"{$appointment['ServiceName']}\" for \"" . trim($appointment['FullName']) . "\" - not available yet");
-                            $state['WaitingAppointments']['LastConfirmation'][$appointment['WaitingAppointmentId']] = $this->state['WaitingAppointments']['LastConfirmation'][$appointment['WaitingAppointmentId']] ?? (new \DateTime('now'))->format('c');
+                            // Remember the negative probe so the pre-check
+                            // can back off until the cooldown elapses.
+                            // LastConfirmation is intentionally NOT touched
+                            // here — it must stay anchored on the last real
+                            // confirmation, not on observation events.
+                            $state['WaitingAppointments']['LastNegativeProbe'][$id] = $nowIso;
                         }
                     }, 5);
                 }
@@ -413,12 +426,14 @@ class ConfirmQueueCommand extends AbstractCommand
         if (file_exists($file)) {
             $this->state = json_decode(file_get_contents($file), true, flags: JSON_THROW_ON_ERROR);
         } else {
-            $this->state = [
-                "WaitingAppointments" => [
-                    "LastConfirmation" => [],
-                ],
-            ];
+            $this->state = [];
         }
+        // Ensure both sub-arrays exist so callers don't need to handle missing keys.
+        // Backwards compatible with state files written by older versions which had
+        // only LastConfirmation.
+        $this->state['WaitingAppointments'] ??= [];
+        $this->state['WaitingAppointments']['LastConfirmation'] ??= [];
+        $this->state['WaitingAppointments']['LastNegativeProbe'] ??= [];
     }
 
     /**
@@ -431,24 +446,92 @@ class ConfirmQueueCommand extends AbstractCommand
         file_put_contents($file, json_encode($this->state, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT));
     }
 
+    /**
+     * Local pre-check: decide whether to bother logging in this cron tick.
+     *
+     * This is purely an optimization to avoid spending captcha solver calls
+     * when the server obviously won't accept a confirmation yet. The server's
+     * "canConfirm" field is always the source of truth — this method only
+     * decides whether to ask the server in the first place.
+     *
+     * If RENEWAL_INTERVAL_HOURS is not configured, this returns true and the
+     * caller proceeds every tick (the original behaviour). Once configured,
+     * the method blocks attempts until either:
+     *   - at least RENEWAL_INTERVAL_HOURS have passed since the earliest
+     *     successful LastConfirmation, AND
+     *   - at least NEGATIVE_PROBE_COOLDOWN_MINUTES have passed since the
+     *     most recent canConfirm:false response from the server.
+     *
+     * A sanity ceiling MAX_SKIP_AGE_HOURS forces an attempt anyway if the
+     * skip window grows too large (protects against clock skew or stale
+     * state).
+     */
     private function doNeedToConfirmAnything(): bool
     {
-        $dtEarliestLastConfirmed = null;
-        foreach ($this->state['WaitingAppointments']['LastConfirmation'] as $lastConfirmedAt) {
-            $dtLastConfirmed = \Carbon\Carbon::createFromFormat('c', $lastConfirmedAt);
-            if ($dtEarliestLastConfirmed === null || $dtEarliestLastConfirmed > $dtLastConfirmed) {
-                $dtEarliestLastConfirmed = $dtLastConfirmed;
+        $intervalHours = $this->config->get('queue.renewalIntervalHours');
+        if ($intervalHours === null) {
+            // Pre-check disabled: every tick proceeds, server decides.
+            return true;
+        }
+
+        $lastConfirmations = $this->state['WaitingAppointments']['LastConfirmation'] ?? [];
+        if (count($lastConfirmations) === 0) {
+            // Never confirmed anything — let the cycle run.
+            return true;
+        }
+
+        $now = Carbon::now();
+
+        $earliest = null;
+        foreach ($lastConfirmations as $isoTs) {
+            $dt = \Carbon\Carbon::createFromFormat('c', $isoTs);
+            if ($earliest === null || $earliest > $dt) {
+                $earliest = $dt;
             }
         }
-        if ($dtEarliestLastConfirmed !== null) {
-            $dtRenewal = clone $dtEarliestLastConfirmed;
-            $dtRenewal->setTimezone('Europe/Moscow');
-            if ($dtRenewal->hour >= 3) {
-                $dtRenewal->addDay();
-            }
-            $dtRenewal->setTime(3, 0); // 03:00 MSK - it's the moment of the confirmation renewal
-            return $dtRenewal <= Carbon::now();
+
+        $maxSkipHours = (int) $this->config->get('queue.maxSkipAgeHours');
+        $hoursSinceConfirm = $earliest->diffInMinutes($now) / 60.0;
+
+        if ($hoursSinceConfirm >= $maxSkipHours) {
+            $this->logger->warning(sprintf(
+                'Pre-check ceiling hit (%.1fh since last confirm ≥ %dh) — forcing attempt',
+                $hoursSinceConfirm,
+                $maxSkipHours
+            ));
+            return true;
         }
+
+        if ($hoursSinceConfirm < $intervalHours) {
+            $this->logger->notice(sprintf(
+                "There's no need to do anything yet: %.1fh since last confirm, renewal interval is %dh",
+                $hoursSinceConfirm,
+                $intervalHours
+            ));
+            return false;
+        }
+
+        $negativeProbes = $this->state['WaitingAppointments']['LastNegativeProbe'] ?? [];
+        if (count($negativeProbes) > 0) {
+            $latestNegative = null;
+            foreach ($negativeProbes as $isoTs) {
+                $dt = \Carbon\Carbon::createFromFormat('c', $isoTs);
+                if ($latestNegative === null || $latestNegative < $dt) {
+                    $latestNegative = $dt;
+                }
+            }
+            $cooldownMinutes = (int) $this->config->get('queue.negativeProbeCooldownMinutes');
+            $minutesSinceNegative = $latestNegative->diffInMinutes($now);
+            if ($minutesSinceNegative < $cooldownMinutes) {
+                $this->logger->notice(sprintf(
+                    "There's no need to do anything yet: server returned canConfirm:false %dmin ago, cooldown is %dmin",
+                    $minutesSinceNegative,
+                    $cooldownMinutes
+                ));
+                return false;
+            }
+        }
+
         return true;
     }
 
