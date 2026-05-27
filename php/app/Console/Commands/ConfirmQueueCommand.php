@@ -353,18 +353,28 @@ class ConfirmQueueCommand extends AbstractCommand
                 ],
             ]);
             $content = $response->getBody()->getContents();
-            $this->logger->debug('FindWaitingAppointments raw response: ' . substr($content, 0, 800));
             $data = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
             if (!is_array($data)) {
                 throw new \Exception("FindWaitingAppointments: unexpected response");
             }
             $itemsKey = array_key_exists('Items', $data) ? 'Items' : (array_key_exists('items', $data) ? 'items' : null);
             if ($itemsKey === null) {
-                throw new \Exception("Missing \"Items\" section in the FindWaitingAppointments response: " . substr($content, 0, 200));
+                // PII: не дампим тело целиком — там могут быть ФИО/email/телефоны.
+                throw new \Exception("Missing \"Items\" section in the FindWaitingAppointments response (keys: " . implode(',', array_keys($data)) . ")");
             }
             if (!is_array($data[$itemsKey])) {
                 throw new \Exception("\"Items\" property is not array in the FindWaitingAppointments response");
             }
+            // Безопасный summary без PII.
+            $summaryIds = array_map(
+                static fn($it) => $it['WaitingAppointmentId'] ?? $it['waitingAppointmentId'] ?? $it['id'] ?? null,
+                $data[$itemsKey]
+            );
+            $this->logger->debug(sprintf(
+                'FindWaitingAppointments: %d item(s), ids=[%s]',
+                count($data[$itemsKey]),
+                implode(',', array_filter($summaryIds, static fn($v) => $v !== null))
+            ));
             $appointments = [];
             foreach ($data[$itemsKey] as $item) {
                 $appointments[] = [
@@ -412,8 +422,11 @@ class ConfirmQueueCommand extends AbstractCommand
                 $msg = $data['ErrorMessage'] ?? $data['errorMessage'] ?? $data['text'] ?? 'Unknown error';
                 throw new \Exception((string) $msg);
             }
-            // Unknown response shape — dump for diagnostics
-            $this->logger->debug('ConfirmWaitingAppointments raw response: ' . substr($content, 0, 500));
+            // Неизвестная форма ответа — НЕ считаем подтверждением. Бросаем,
+            // чтобы вызывающий код не записал LastConfirmation и повторил
+            // попытку. Тело логируем для диагностики.
+            $this->logger->debug('ConfirmWaitingAppointments unexpected response: ' . substr($content, 0, 500));
+            throw new \Exception('ConfirmWaitingAppointments: unexpected response shape');
         }, 5);
     }
 
