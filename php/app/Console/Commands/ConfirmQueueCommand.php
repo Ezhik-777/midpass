@@ -90,6 +90,7 @@ class ConfirmQueueCommand extends AbstractCommand
             logger: $this->logger,
             guardPlace: (int) $this->config->get('queue.autoConfirmGuardPlace'),
             includeName: (bool) $this->config->get('queue.telegramIncludeName'),
+            dumpRaw: (bool) $this->config->get('queue.telegramDumpRaw'),
         );
 
         // Near-front heads-up alert (with de-dup via state)

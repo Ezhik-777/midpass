@@ -60,6 +60,32 @@ test('AppointmentProcessor: holds (no confirm) when near the front', function ()
     assert_eq(0, $cap->calls, 'no captcha spent on hold');
 });
 
+test('AppointmentProcessor: hold sends a definite "server opened" alert, no confirm', function () use ($mkState) {
+    $api = new FakeApi(); $cap = new FakeCaptcha(); $notif = new FakeNotifier();
+    $p = new AppointmentProcessor($api, $cap, $notif, null, 3, true, true);
+    $state = $mkState();
+    $p->process(['WaitingAppointmentId' => 'id1', 'CanConfirm' => true, 'ServiceName' => 'Загран', 'PlaceInQueue' => 'Место 2', 'FullName' => 'Ivanov', '_raw' => ['canConfirm' => true, 'email' => 'x']], $state);
+
+    assert_eq([], $api->confirmed, 'must not auto-confirm near the front');
+    assert_eq(1, count($notif->messages));
+    assert_true(str_contains($notif->messages[0], 'СЕРВЕР ОТКРЫЛ'));
+    assert_true(str_contains($notif->messages[0], 'Место 2'));
+    assert_true(isset($state['Notifications']['LastHoldAlert']['id1']));
+    // raw dump masks PII value but keeps key
+    assert_true(str_contains($notif->messages[0], 'email'));
+    assert_true(!str_contains($notif->messages[0], '"x"'));
+});
+
+test('AppointmentProcessor: hold alert is de-duped within 6h', function () use ($mkState) {
+    $api = new FakeApi(); $cap = new FakeCaptcha(); $notif = new FakeNotifier();
+    $p = new AppointmentProcessor($api, $cap, $notif, null, 3, true, true);
+    $state = $mkState();
+    $appt = ['WaitingAppointmentId' => 'id1', 'CanConfirm' => true, 'ServiceName' => 'X', 'PlaceInQueue' => 'Место 1', 'FullName' => 'N'];
+    $p->process($appt, $state);
+    $p->process($appt, $state);
+    assert_eq(1, count($notif->messages), 'second hold alert within 6h must be de-duped');
+});
+
 test('AppointmentProcessor: confirms when far from front', function () use ($mkState) {
     $api = new FakeApi(); $cap = new FakeCaptcha(); $notif = new FakeNotifier();
     $p = new AppointmentProcessor($api, $cap, $notif, null, 3, true);

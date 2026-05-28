@@ -46,6 +46,7 @@ final class StateStore
         $state['WaitingAppointments']['LastNegativeProbe'] ??= [];
         $state['Notifications'] ??= [];
         $state['Notifications']['LastPlaceAlert'] ??= [];
+        $state['Notifications']['LastHoldAlert'] ??= [];
         return $state;
     }
 }

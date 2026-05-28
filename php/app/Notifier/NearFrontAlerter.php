@@ -58,8 +58,9 @@ final class NearFrontAlerter
 
         $name = $this->includeName ? trim((string) ($appointment['FullName'] ?? '')) . "\n" : '';
         $delivered = $this->notifier->send(sprintf(
-            "🔔 ВНИМАНИЕ: ты почти у начала очереди!\n%s%s\nМесто в очереди: %s\n\n"
-            . "Возможно, скоро предложат дату записи — зайди на q.midpass.ru и проверь вручную.\n\n"
+            "🔔 Ты близко к началу очереди.\n%s%s\nМесто в очереди: %s\n\n"
+            . "Окно подтверждения может открыться скоро — поглядывай. Как только сервер реально "
+            . "откроет подтверждение, пришлю отдельное сообщение.\n\n"
             . "Данные заявки:\n%s",
             $name,
             (string) ($appointment['ServiceName'] ?? ''),

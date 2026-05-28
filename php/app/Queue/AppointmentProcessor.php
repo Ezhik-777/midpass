@@ -26,6 +26,7 @@ final class AppointmentProcessor
         ?LoggerInterface $logger = null,
         private int $guardPlace = 3,
         private bool $includeName = true,
+        private bool $dumpRaw = true,
     ) {
         $this->logger = $logger ?? new NullLogger();
     }
@@ -54,6 +55,9 @@ final class AppointmentProcessor
                     $id,
                     (string) $appointment['PlaceInQueue']
                 ));
+                // Real "you can act now" moment — server allows confirm at the
+                // front. Send a definite alert so the user confirms manually.
+                $this->sendHoldAlert($appointment, $state, $id);
                 return;
             }
 
@@ -83,6 +87,50 @@ final class AppointmentProcessor
         }
         $place = PlaceParser::parse($appointment['PlaceInQueue'] ?? null);
         return $place === null || $place <= $this->guardPlace;
+    }
+
+    /**
+     * Definite alert for the real moment the server opens confirmation at the
+     * front (canConfirm:true + hold). De-duplicated to once per 6h so it does
+     * not spam while the window stays open. Recorded only on successful delivery.
+     */
+    private function sendHoldAlert(array $appointment, array &$state, string $id): void
+    {
+        if (!$this->notifier->isEnabled()) {
+            return;
+        }
+        $now = new \DateTime('now');
+        $last = $state['Notifications']['LastHoldAlert'][$id] ?? null;
+        if ($last !== null && isset($last['ts'])) {
+            try {
+                $ageHours = ($now->getTimestamp() - (new \DateTime($last['ts']))->getTimestamp()) / 3600;
+            } catch (\Throwable) {
+                $ageHours = PHP_INT_MAX;
+            }
+            if ($ageHours < 6) {
+                return;
+            }
+        }
+
+        $name = $this->includeName ? trim((string) ($appointment['FullName'] ?? '')) . "\n" : '';
+        $dump = '';
+        if ($this->dumpRaw && is_array($appointment['_raw'] ?? null)) {
+            $json = json_encode(AppointmentRedactor::maskValuesExcept($appointment['_raw']), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            $dump = $json === false ? '' : "\n\nДанные заявки:\n" . $json;
+        }
+        $message = sprintf(
+            "🟢 СЕРВЕР ОТКРЫЛ ПОДТВЕРЖДЕНИЕ — твоя очередь!\n%s%s\nМесто: %s\n\n"
+            . "Зайди на q.midpass.ru, проверь предложенную дату и подтверди ИЛИ отклони ВРУЧНУЮ "
+            . "(обычно на решение даётся около 24 часов).%s",
+            $name,
+            (string) ($appointment['ServiceName'] ?? ''),
+            (string) ($appointment['PlaceInQueue'] ?? ''),
+            $dump
+        );
+
+        if ($this->notifier->send($message)) {
+            $state['Notifications']['LastHoldAlert'][$id] = ['ts' => $now->format('c')];
+        }
     }
 
     private function confirmationMessage(array $appointment): string

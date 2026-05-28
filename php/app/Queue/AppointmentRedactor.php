@@ -24,6 +24,9 @@ final class AppointmentRedactor
         'waitingappointmentid', 'id', 'placeinqueue', 'placeinqueuestring',
         'canconfirm', 'cancancel', 'serviceid', 'servicename',
         'serviceprovidercode', 'scheduleddatetimestring', 'scheduleddatetime',
+        // Non-PII operational metrics (safe to show; help read the situation).
+        'daysofregistration', 'daysofconfirmation', 'countofconfirmations',
+        'countofactiveappointments', 'countofcancels', 'orderbyvalue',
     ];
 
     /**
