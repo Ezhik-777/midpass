@@ -1,0 +1,41 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: mbstring, json, tokenizer, gd
+          coverage: none
+
+      - name: Install dependencies
+        working-directory: php
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Lint all PHP sources
+        run: find php/app php/config php/tests php/console.php php/init.php -name '*.php' -print0 | xargs -0 -n1 php -l
+
+      - name: Run unit tests
+        run: php php/tests/unit/run.php
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image (validates Dockerfile + patch overlay)
+        run: docker build -t midpass-bot:ci .
+
+      - name: Smoke check (image PHP + all app/config files parse)
+        run: |
+          docker run --rm --entrypoint /opt/midpass/bin/php midpass-bot:ci -v
+          docker run --rm --entrypoint /bin/sh midpass-bot:ci -c \
+            'set -e; for f in $(find /opt/midpass/php/app /opt/midpass/php/config -name "*.php"); do /opt/midpass/bin/php -l "$f"; done'

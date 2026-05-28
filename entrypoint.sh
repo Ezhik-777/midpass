@@ -13,6 +13,9 @@ run_once() {
     ./bin/php -c ./bin/php.ini -n ./php/console.php "confirm-queue"
     rc=$?
     set -e
+    # Heartbeat for the container HEALTHCHECK: proves the loop keeps ticking
+    # (written every run regardless of confirm result).
+    date +%s > /opt/midpass/temp/heartbeat 2>/dev/null || true
     if [[ $rc -eq 0 ]]; then
         echo "[$(date -Iseconds)] === OK ==="
     else

@@ -11,7 +11,28 @@ SERVICE_PROVIDER_ID=9c9465a1-c3e6-8964-94c4-4f0c9e844079
 
 TIMEZONE=Europe/Berlin
 
+# Опционально: базовый URL (по умолчанию https://q.midpass.ru)
+# QUEUE_BASE_URL=https://q.midpass.ru
+
 # Опционально: ключ от rucaptcha.com / 2captcha.com для решения капчи
 # (если не задан — используется встроенный распознаватель, который может не справиться с обновлённой капчей)
 # RUCAPTCHA_API_KEY=
 # RUCAPTCHA_ENDPOINT=https://api.rucaptcha.com
+
+# Опционально: pre-check (экономит капчу между окнами подтверждения).
+# Полное описание параметров — в config-dist.txt.
+# RENEWAL_INTERVAL_HOURS=25
+# NEGATIVE_PROBE_COOLDOWN_MINUTES=60
+# MAX_SKIP_AGE_HOURS=28
+
+# Опционально: уведомления в Telegram (токен от @BotFather, chat id —
+# написать боту /start и посмотреть getUpdates). Если не заданы — выключено.
+# TELEGRAM_BOT_TOKEN=
+# TELEGRAM_CHAT_ID=
+# TELEGRAM_ALERT_PLACE_THRESHOLD=5
+# Гард авто-подтверждения у начала очереди (0 — выкл). Default 3.
+# AUTO_CONFIRM_GUARD_PLACE=3
+# Включать ФИО в Telegram-сообщения (0 — нет). Default 1.
+# TELEGRAM_INCLUDE_NAME=1
+# Прикладывать дамп данных заявки к алерту у начала очереди (0 — нет). Default 1.
+# TELEGRAM_DUMP_RAW=1
